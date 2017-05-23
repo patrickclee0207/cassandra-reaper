@@ -51,6 +51,7 @@ import org.cognitor.cassandra.migration.MigrationTask;
 import org.joda.time.DateTime;
 
 import io.dropwizard.setup.Environment;
+import java.util.function.Predicate;
 import systems.composable.dropwizard.cassandra.CassandraFactory;
 
 public final class CassandraStorage implements IStorage {
@@ -62,7 +63,6 @@ public final class CassandraStorage implements IStorage {
   private static final String SELECT_CLUSTER = "SELECT * FROM cluster";
   private static final String SELECT_REPAIR_SCHEDULE = "SELECT * FROM repair_schedule";
   private static final String SELECT_REPAIR_UNIT = "SELECT * FROM repair_unit";
-  private static final String SELECT_REPAIR_RUN = "SELECT * FROM repair_run";
 
   /* prepared statements */
   private PreparedStatement insertClusterPrepStmt;
@@ -316,17 +316,19 @@ public final class CassandraStorage implements IStorage {
 
   @Override
   public Collection<RepairRun> getRepairRunsWithState(RunState runState) {
-    // There shouldn't be many repair runs, so we'll brute force this one
-    // We'll switch to 2i if performance sucks IRL
-    Collection<RepairRun> repairRuns = Lists.<RepairRun>newArrayList();
-    ResultSet repairRunResults = session.execute(SELECT_REPAIR_RUN);
-    for(Row repairRun:repairRunResults){
-      if(RunState.valueOf(repairRun.getString("state")).equals(runState)){
-        repairRuns.add(buildRepairRunFromRow(repairRun, repairRun.getUUID("id")));
-      }
+    List<ResultSetFuture> repairRunFutures = Lists.<ResultSetFuture>newArrayList();
+    for(Cluster cluster : getClusters()){
+        // Grab all ids for the given cluster name
+        Collection<UUID> repairRunIds = getRepairRunIdsForCluster(cluster.getName());
+        // Grab repair runs asynchronously for all the ids returned by the index table
+        for(UUID repairRunId:repairRunIds){
+          repairRunFutures.add(session.executeAsync(getRepairRunPrepStmt.bind(repairRunId)));
+        }
     }
-
-    return repairRuns;
+    return getRepairRunsAsync(repairRunFutures)
+            .stream()
+            .filter((RepairRun t) -> t.getRunState() == runState)
+            .collect(Collectors.toSet());
   }
 
   @Override
